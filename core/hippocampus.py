@@ -288,6 +288,23 @@ class Hippocampus:
         np.clip(bias, 0.0, 0.3, out=bias)
         return bias
 
+    def ca3_chain(self, n_chains: int) -> int:
+        cue = self._last_ca3_cells
+        chain_count = 0
+        for _ in range(n_chains):
+            if len(cue) == 0:
+                break
+            new_active = ca3_retrieve_jit(
+                self.ca3_weights, cue,
+                HIPPO_CA3_SIZE, HIPPO_CA3_SPARSITY, HIPPO_RETRIEVE_ITER
+            )
+            if len(new_active) == 0:
+                break
+            cue = new_active
+            self._last_ca3_cells = new_active
+            chain_count += 1
+        return chain_count
+
     def report(self) -> dict:
         return {
             "binds": self.binds,

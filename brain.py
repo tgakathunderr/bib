@@ -30,6 +30,7 @@ import numpy as np
 
 from bib.config import (
     ACTION_NAMES,
+    GAMMA,
     MODALITY_NAMES,
     N_ACTIONS,
     SDR_SIZE,
@@ -95,11 +96,14 @@ class BIB:
         self.episodic_buffer = EpisodicBuffer()
         self._sleep_orchestrator = SleepOrchestrator()
 
-        # ── State tracking ──────────────────────────────────────────────────
         self._tick_count: int = 0
         self._prev_world_state: np.ndarray = np.array([], dtype=np.int64)
         self._prev_action: int = 0
         self._prev_td_error: float = 0.0
+        self._prev_value: float = 0.0
+        self._last_is_exploring: bool = False
+        self._last_motor_error: float = 0.0
+        self._last_surprise: float = 0.0
 
     # ────────────────────────────────────────────────────────────────────────
     # Main tick
@@ -155,11 +159,24 @@ class BIB:
             total_surprise += surprise
         avg_surprise = total_surprise / max(len(MODALITY_NAMES), 1)
 
-        # ── 4. Association Cortex: fuse 6×L3 → unified world-state SDR ───────
+        # ── 4. Association Cortex: fuse 6 modal SDRs → world-state SDR ──────
+        # Uses the raw (L1-level) modal SDRs, not the collapsed L3 outputs:
+        # deep STDP pooling erodes spatial discriminability, and the actor
+        # needs a state representation that distinguishes world positions.
         world_state_sdr, assoc_surprise = self.association_cortex.step(
-            modal_l3_sdrs, ach=self.brainstem.ach
+            modal_sdrs, ach=self.brainstem.ach
         )
         surprise = (avg_surprise + assoc_surprise) * 0.5
+
+        # ── 4b. Compute V(s) and TD error ───────────────────────────────────
+        v_current = self.basal_ganglia.estimate_value(world_state_sdr)
+
+        if len(self._prev_world_state) > 0:
+            td_error = reward + GAMMA * v_current - self._prev_value
+        else:
+            td_error = reward
+
+        self._prev_value = v_current
 
         # ── 5. Amygdala: emotional salience tagging ───────────────────────────
         pain_signal = float(hs.get("pain", 0.0) or 0.0)
@@ -176,33 +193,29 @@ class BIB:
             amygdala_salience=salience,
             cortisol=self.hypothalamus.cortisol,
         )
-        # Inject hippocampal apical bias into association cortex
         self.association_cortex.apply_hippo_bias(hippo_bias)
+        self.association_cortex.apply_temporal_bias(temporal_ctx)
 
-        # ── 7. Basal Ganglia: estimate V(s) ──────────────────────────────────
-        v_current = self.basal_ganglia.estimate_value(world_state_sdr)
-
-        # ── 8. Brainstem: update all 5 chemicals ─────────────────────────────
-        # Need V(s') — use current V as approximation until next tick
-        v_next = v_current   # updated after action taken, next tick
-        td_error, chem = self.brainstem.tick(
-            reward=reward,
+        # ── 7. Brainstem: update all 4 chemicals ─────────────────────────────
+        surprise = (surprise + ca1_novelty) * 0.5
+        self._last_surprise = surprise
+        self.brainstem.tick(
             surprise=surprise,
-            v_current=self.basal_ganglia.estimate_value(self._prev_world_state)
-                if len(self._prev_world_state) > 0 else 0.0,
-            v_next=v_current,
+            td_error=td_error,
             amygdala_salience=salience,
             homeostatic_deficit=homeostatic_deficit,
+            ne_spike=ne_spike,
         )
         # Inject cortisol from hypothalamus
-        chem.cortisol = self.hypothalamus.cortisol
+        self.brainstem.cortisol = self.hypothalamus.cortisol
 
-        # ── 9. Respiration: always-on brainstem background ───────────────────
+        # ── 8. Respiration: always-on brainstem background ───────────────────
         energy_in_hs = float(hs.get("energy", 1.0) or 1.0)
         self.brainstem.respiration_tick(energy_in_hs)
 
         # ── 10. Prefrontal: working memory + goal SDR update ──────────────────
         pfc_bias = self.prefrontal.tick(world_state_sdr, da=self.brainstem.da)
+        self.association_cortex.apply_pfc_bias(pfc_bias)
 
         # ── 11. Cerebellum: predict next state, get correction ────────────────
         cereb_correction = self.cerebellum.get_score_correction(world_state_sdr)
@@ -215,7 +228,9 @@ class BIB:
             ach=self.brainstem.ach,
             serotonin=self.brainstem.sht,
             fear_salience=fear_salience,
+            cerebellum_correction=cereb_correction,
         )
+        self._last_is_exploring = bool(is_exploring)
 
         # ── 13. Cerebellum: forward prediction for this action ────────────────
         self.cerebellum.predict_next(world_state_sdr, action)
@@ -225,8 +240,7 @@ class BIB:
             self.basal_ganglia.learn(
                 self._prev_world_state, self._prev_action, td_error
             )
-            # Cerebellum: update forward model with what actually happened
-            motor_error = self.cerebellum.learn(
+            self._last_motor_error = self.cerebellum.learn(
                 self._prev_world_state, self._prev_action, world_state_sdr
             )
 
@@ -305,6 +319,9 @@ class BIB:
             "episodic_buffer_size": len(self.episodic_buffer),
             "last_action": ACTION_NAMES[self._prev_action],
             "last_td_error": round(self._prev_td_error, 4),
+            "is_exploring": self._last_is_exploring,
+            "last_motor_error": round(self._last_motor_error, 4),
+            "last_surprise": round(self._last_surprise, 4),
         }
 
     def get_action_name(self, action_idx: int) -> str:

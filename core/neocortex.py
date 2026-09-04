@@ -303,8 +303,20 @@ class NeocortexInstance:
         return l1_surprise
 
     def get_l3_sdr(self) -> np.ndarray:
-        """L3 abstract SDR — consumed by Association Cortex or PFC."""
-        return top_k_indices_jit(self.temporal_pools[2], SDR_SPARSITY)
+        """L3 abstract SDR — consumed by Association Cortex or PFC.
+
+        Returns the CURRENT L3 winner cells (state-dependent live
+        representation), not the frequency top-K of the leaky temporal pool.
+        The frequency pool is a running activity histogram; using it as the
+        layer output conflates "how often a column fired" with "what the
+        current state is" and collapses positionally-distinct inputs toward
+        a common mode, which destroys the discriminability the actor-critic
+        needs.
+        """
+        winner = self.layers[2].winner_cells
+        if winner.sum() == 0:
+            return self.layers[2].get_predictive_columns()
+        return np.where(winner)[0] // CELLS_PER_COLUMN
 
     def get_l1_predictive_columns(self) -> np.ndarray:
         return self.layers[0].get_predictive_columns()

@@ -25,6 +25,7 @@ from bib.config import (
     NE_GAIN_MIN,
     SDR_SIZE,
     SDR_SPARSITY,
+    THAL_MIN_SIGNAL_ENERGY,
     THAL_SUPPRESSION,
 )
 
@@ -71,6 +72,10 @@ class ThalamicEncoder:
             sensor_vec = buf
         else:
             sensor_vec = np.asarray(sensor_vec, dtype=np.float32)
+
+        energy = float(np.dot(sensor_vec, sensor_vec))
+        if energy < THAL_MIN_SIGNAL_ENERGY:
+            return np.array([], dtype=np.int64)
 
         # Linear projection: (input_dim,) @ (input_dim, SDR_SIZE) → (SDR_SIZE,)
         activations = sensor_vec @ self.projection

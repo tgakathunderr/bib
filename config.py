@@ -77,6 +77,7 @@ MODALITY_INPUT_DIMS: dict[str, int] = {
 NE_GAIN_MIN: float = 0.5  # column activation gain under low NE (drowsy)
 NE_GAIN_MAX: float = 2.0  # column activation gain under high NE (alert)
 THAL_SUPPRESSION: float = 0.4  # how much top-down prediction cancels bottom-up
+THAL_MIN_SIGNAL_ENERGY: float = 1e-6  # below this input energy → no SDR (silent modality)
 
 # ---------------------------------------------------------------------------
 # Hippocampus — DG → CA3 → CA1 → EC
@@ -182,7 +183,11 @@ N_ACTIONS: int = 8  # 7 MRS GREN + Idle
 GAMMA: float = 0.95  # temporal discount factor
 LR_ACTOR: float = 0.05  # D1 Go pathway learning rate
 LR_NOGO: float = 0.03  # D2 NoGo pathway learning rate
-LR_CRITIC: float = 0.10  # Value function (Critic) learning rate
+LR_CRITIC: float = 0.01  # Value function (Critic) LR — kept small: per-column
+#   deltas act on overlapping SDR columns (a column belongs to many states),
+#   and TD(0) with linear value approximation diverges at high LR (Sutton &
+#   Barto §9.4). 0.10 caused V(s) to blow up to ~74 for a reward-bounded task;
+#   0.01 keeps it stable.
 LAMBDA_TRACE: float = 0.70  # eligibility trace decay (TD-λ)
 BABBLE_THRESHOLD: float = 0.10  # confidence floor before exploration
 BABBLE_RATE_BASE: float = 0.10  # base random exploration probability

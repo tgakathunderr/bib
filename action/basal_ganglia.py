@@ -97,11 +97,12 @@ class BasalGanglia:
     # ────────────────────────────────────────────────────────────────────────
     def select_action(
         self,
-        world_state_sdr: np.ndarray,  # int64[:] — Association Cortex L3
+        world_state_sdr: np.ndarray,
         da: float,
         ach: float,
         serotonin: float,
-        fear_salience: float,         # from amygdala — suppresses risky actions
+        fear_salience: float,
+        cerebellum_correction: np.ndarray | None = None,
     ) -> tuple[int, bool]:
         """
         Select motor action via Go/NoGo competition.
@@ -122,8 +123,10 @@ class BasalGanglia:
         if fear_salience > 0.5:
             effective_nogo[self._last_action] += fear_salience * 0.5
 
-        # Net Q-scores: Go - NoGo
         net_scores = go_scores - effective_nogo
+
+        if cerebellum_correction is not None and len(cerebellum_correction) == N_ACTIONS:
+            net_scores += cerebellum_correction
 
         best_action = int(np.argmax(net_scores))
         max_score = float(net_scores[best_action])

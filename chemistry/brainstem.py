@@ -19,8 +19,8 @@ import numpy as np
 
 from bib.config import (
     ACH_DECAY, ACH_SURPRISE_GAIN, BASE_ACH, BASE_DA, BASE_NE, BASE_5HT,
-    DA_DECAY, HT5_DECAY, MAX_ACH, MAX_DA, MAX_NE, MAX_5HT, MIN_DA,
-    NE_DECAY, GAMMA,
+    HT5_DECAY, MAX_ACH, MAX_DA, MAX_NE, MAX_5HT, MIN_DA,
+    NE_DECAY,
 )
 
 
@@ -52,48 +52,16 @@ class Brainstem:
         self.sht: float = BASE_5HT
         self.ach: float = BASE_ACH
 
-        # DA critic: tracks V(s) for TD-RPE computation
-        # Actual weight matrix lives in basal_ganglia.py
-        # Here we store the last computed V(s) for next-tick RPE
-        self._v_prev: float = 0.0
         self._ach_window: list[float] = []
-        self._ach_window_size: int = 10   # variance window for habituation
-
-    # ────────────────────────────────────────────────────────────────────────
-    # VTA: Dopamine — Temporal Difference RPE (Schultz 1997)
-    # ────────────────────────────────────────────────────────────────────────
-    def update_dopamine(
-        self,
-        reward: float,      # external reward signal (-1.0 to +1.0)
-        v_current: float,   # V(s) at current state (from Critic)
-        v_next: float,      # V(s') at next state (from Critic)
-    ) -> float:
-        """
-        Compute DA as TD Reward Prediction Error:
-          δ = r + γ·V(s') - V(s)
-        This is the biologically correct dopamine signal (Schultz 1997).
-        Not a raw reward spike — represents 'better or worse than expected'.
-        """
-        td_error = reward + GAMMA * v_next - v_current
-        self.da = float(np.clip(BASE_DA + td_error, MIN_DA, MAX_DA))
-        self._v_prev = v_current
-        return td_error  # returned so BG can use it for weight updates
-
-    def _decay_dopamine(self) -> None:
-        """Phasic decay back to baseline."""
-        self.da = self.da * DA_DECAY + BASE_DA * (1.0 - DA_DECAY)
+        self._ach_window_size: int = 10
 
     # ────────────────────────────────────────────────────────────────────────
     # LC: Norepinephrine — arousal spike on unexpected novelty
     # ────────────────────────────────────────────────────────────────────────
-    def update_ne(self, ach_spike: float, amygdala_salience: float) -> None:
-        """
-        LC fires (NE spike) when:
-          - ACh is high (cortex detected surprise), AND
-          - Amygdala salience is elevated (emotionally significant)
-        Aston-Jones & Cohen (2005): LC fires to unexpected, relevant stimuli.
-        """
+    def update_ne(self, ach_spike: float, amygdala_salience: float, ne_spike: bool) -> None:
         ne_drive = ach_spike * amygdala_salience
+        if ne_spike:
+            ne_drive += amygdala_salience
         self.ne = float(np.clip(self.ne + ne_drive, 0.0, MAX_NE))
         self.ne = self.ne * NE_DECAY + BASE_NE * (1.0 - NE_DECAY)
 
@@ -158,23 +126,21 @@ class Brainstem:
     # ────────────────────────────────────────────────────────────────────────
     def tick(
         self,
-        reward: float,
         surprise: float,
-        v_current: float,
-        v_next: float,
+        td_error: float,
         amygdala_salience: float,
         homeostatic_deficit: float,
-    ) -> tuple[float, "ChemicalState"]:
-        """
-        Update all 4 chemical systems for one brain tick.
-        Returns (td_error, ChemicalState snapshot).
-        """
-        td_error = self.update_dopamine(reward, v_current, v_next)
+        ne_spike: bool = False,
+    ) -> ChemicalState:
+        self.da = float(np.clip(BASE_DA + td_error, MIN_DA, MAX_DA))
         self.update_ach(surprise)
-        self.update_ne(ach_spike=max(0.0, self.ach - BASE_ACH), amygdala_salience=amygdala_salience)
+        self.update_ne(
+            ach_spike=max(0.0, self.ach - BASE_ACH),
+            amygdala_salience=amygdala_salience,
+            ne_spike=ne_spike,
+        )
         self.update_serotonin(homeostatic_deficit)
-
-        return td_error, self.snapshot()
+        return self.snapshot()
 
     def snapshot(self) -> "ChemicalState":
         return ChemicalState(

@@ -121,11 +121,8 @@ def ca3_retrieve_jit(
                 if src >= 0 and state[src] > 0:
                     energy[i] += W[i, src]
 
-        # Winner-take-all: select top-k cells
         k = min(ca3_sparsity, ca3_size)
-        # Find k-th largest via partial scan
-        sorted_idx = np.argsort(-energy)
-        new_active = sorted_idx[:k].astype(np.int64)
+        new_active = np.argpartition(energy, -k)[-k:].astype(np.int64)
 
         # Check convergence
         converged = True
@@ -155,21 +152,11 @@ def ca3_retrieve_jit(
     return prev_active
 
 
-@njit(cache=True)
 def ca3_renormalize_jit(
-    W: np.ndarray,           # float32[CA3_SIZE, CA3_SIZE] — in-place
-    renorm_factor: float,    # e.g. 0.97 — Tononi SHY downscaling
+    W: np.ndarray,
+    renorm_factor: float,
 ) -> None:
-    """
-    SWS synaptic renormalization (Tononi & Cirelli 2006 — Synaptic Homeostasis Hypothesis).
-    All CA3 weights scaled down uniformly during deep sleep.
-    Weak attractors fade; strong (often-replayed) attractors survive.
-    Net effect: forgetting the unimportant while preserving the essential.
-    """
-    rows, cols = W.shape
-    for i in range(rows):
-        for j in range(cols):
-            W[i, j] *= renorm_factor
+    W *= renorm_factor
 
 
 @njit(cache=True)

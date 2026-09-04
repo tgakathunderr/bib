@@ -19,6 +19,7 @@ from __future__ import annotations
 import numpy as np
 
 from bib.config import (
+    CELLS_PER_COLUMN,
     MODALITY_NAMES,
     N_MODALITIES,
     SDR_SIZE,
@@ -47,64 +48,90 @@ class AssociationCortex:
 
     def __init__(self) -> None:
         self.cortex = NeocortexInstance(name="association")
-        self._l3_cache: np.ndarray = np.array([], dtype=np.int64)
+        self._world_state_cache: np.ndarray = np.array([], dtype=np.int64)
 
     def step(
         self,
-        modal_l3_sdrs: dict[str, np.ndarray],
+        modal_sdrs: dict[str, np.ndarray],
         ach: float,
         learn: bool = True,
     ) -> tuple[np.ndarray, float]:
         """
-        Fuse 6 modal L3 SDRs into one cross-modal representation.
+        Fuse per-modality SDRs into one cross-modal world-state representation.
 
-        Uses Knuth multiplicative hash projection (zero extra memory):
-        Each modality's active columns are hashed into [0, SDR_SIZE) with
-        a unique per-modality offset to prevent hash collisions between modalities.
-        Activation scores are accumulated; top-SDR_SPARSITY columns win.
+        Modalities are hashed into the shared column space, then the fused
+        columns are run through the association neocortex for STDP sequence
+        learning and surprise. The exported world-state is the association
+        cortex's L1 live winner cells — the topographic, unsmoothed fusion —
+        because deeper STDP layers monotonically erode the spatial
+        discriminability the actor-critic depends on.
 
         Args:
-            modal_l3_sdrs: dict[modality → int64[:SDR_SPARSITY]]
+            modal_sdrs: dict[modality → int64[:SDR_SPARSITY]] — per-modality
+                        active column indices (raw or L1-level, not collapsed L3)
             ach: acetylcholine level (gates STDP plasticity)
             learn: whether to apply STDP
 
         Returns:
-            (unified_sdr, surprise)  —  int64[:SDR_SPARSITY], float
+            (world_state_sdr, surprise)  —  int64[:SDR_SPARSITY], float
         """
-        # Hash-project each modality's L3 SDR into shared column space
+        # Hash-project each modality into shared column space
         activations = np.zeros(SDR_SIZE, dtype=np.float32)
         for i, name in enumerate(MODALITY_NAMES):
-            sdr = modal_l3_sdrs.get(name, np.array([], dtype=np.int64))
+            sdr = modal_sdrs.get(name, np.array([], dtype=np.int64))
             if len(sdr) == 0:
                 continue
             offset = _MODALITY_HASH_OFFSETS[i]
-            # Knuth hash: each SDR column → deterministic SDR_SIZE slot
             hashed = ((sdr.astype(np.int64) * offset) & 0xFFFFFFFF) % SDR_SIZE
             activations[hashed] += 1.0
 
-        # Top-K column selection — competitive inhibition
         if activations.max() < 1e-8:
             l1_cols = np.arange(SDR_SPARSITY, dtype=np.int64)
         else:
-            top_k = np.argpartition(activations, -SDR_SPARSITY)[-SDR_SPARSITY:]
-            l1_cols = top_k.astype(np.int64)
+            l1_cols = np.argpartition(activations, -SDR_SPARSITY)[-SDR_SPARSITY:].astype(np.int64)
 
-        # Run through the association neocortex
         surprise = self.cortex.step(l1_cols, ach=ach, learn=learn)
 
-        # Cache L3 output
-        self._l3_cache = self.cortex.get_l3_sdr()
-        return self._l3_cache, float(surprise)
+        # World-state = cortical L1 winners (discriminative), not L3 (collapsed).
+        winner = self.cortex.layers[0].winner_cells
+        if winner.sum() == 0:
+            world = l1_cols
+        else:
+            world = np.where(winner)[0] // CELLS_PER_COLUMN
+        self._world_state_cache = world.astype(np.int64)
+        return self._world_state_cache, float(surprise)
+
+    def replay(
+        self,
+        sdr: np.ndarray,
+        ach: float,
+        learn: bool = True,
+    ) -> float:
+        surprise = self.cortex.step(sdr, ach=ach, learn=learn)
+        self._world_state_cache = self.cortex.get_l3_sdr()
+        return float(surprise)
 
     def get_world_state_sdr(self) -> np.ndarray:
-        """Returns the last computed cross-modal L3 SDR."""
-        return self._l3_cache
+        """Returns the last computed cross-modal world-state SDR."""
+        return self._world_state_cache
 
     def get_l1_predictive_columns(self) -> np.ndarray:
         return self.cortex.get_l1_predictive_columns()
 
     def apply_hippo_bias(self, bias: np.ndarray) -> None:
         """Hippocampal top-down apical feedback → association cortex L1."""
+        self.cortex.layers[0].apply_apical_bias(bias)
+
+    def apply_pfc_bias(self, bias: np.ndarray) -> None:
+        self.cortex.layers[0].apply_apical_bias(bias)
+
+    def apply_temporal_bias(self, temporal_cols: np.ndarray, gain: float = 0.2) -> None:
+        if len(temporal_cols) == 0:
+            return
+        bias = np.zeros(SDR_SIZE, dtype=np.float32)
+        valid = temporal_cols[(temporal_cols >= 0) & (temporal_cols < SDR_SIZE)]
+        if len(valid) > 0:
+            bias[valid] = gain
         self.cortex.layers[0].apply_apical_bias(bias)
 
     def reset_context(self) -> None:

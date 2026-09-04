@@ -85,11 +85,8 @@ class SleepOrchestrator:
 
         episodes_n1n2 = episodic_buffer.sample_chronological(n_n1n2)
         for ep in episodes_n1n2:
-            association_cortex.step(
-                {"_flat": ep.sdr},   # replay as single-modality input
-                ach=brainstem.ach,
-                learn=True,
-            )
+            if len(ep.sdr) > 0:
+                association_cortex.replay(ep.sdr, ach=brainstem.ach, learn=True)
             report.n1n2_ticks += 1
 
         # ── Stage 2: SWS — Systems Consolidation ────────────────────────────
@@ -99,14 +96,8 @@ class SleepOrchestrator:
         swr_episodes = episodic_buffer.sample_prioritized(SWS_N_REPLAYS)
         for ep in swr_episodes:
             if len(ep.sdr) > 0:
-                # Replay through hippocampus CA3 and feed to association cortex
-                ca3_cells = hippocampus.retrieve(ep.sdr)
-                # Cortical consolidation replay (low ACh = transfer mode)
-                association_cortex.step(
-                    {"_flat": ep.sdr},
-                    ach=brainstem.ach,   # 0.05 — SWS mode
-                    learn=True,
-                )
+                hippocampus.retrieve(ep.sdr)
+                association_cortex.replay(ep.sdr, ach=brainstem.ach, learn=True)
                 # Reinforce BG weights with historical TD error
                 basal_ganglia.learn(ep.sdr, ep.action, ep.td_error)
                 report.sws_replays += 1
@@ -118,19 +109,8 @@ class SleepOrchestrator:
         # ── Stage 3: REM — Association & Goal Consolidation ──────────────────
         brainstem.override_for_sleep(sws_mode=False)  # ACh=0.95, NE=0, 5-HT=0
 
-        # CA3 self-chaining: retrieve A → use as cue for B → chain
         if hippocampus.binds > 0:
-            cue = hippocampus._last_ca3_cells
-            for _ in range(min(REM_N_CHAINS, n_rem)):
-                if len(cue) == 0:
-                    break
-                # Retrieve from CA3 using current cue as partial input
-                new_ca3 = hippocampus.retrieve(
-                    (cue[:16] % 16384).astype(np.int64)  # reverse-map to cortex
-                )
-                if len(new_ca3) > 0:
-                    cue = new_ca3
-                report.rem_chains += 1
+            report.rem_chains = hippocampus.ca3_chain(min(REM_N_CHAINS, n_rem))
 
         # PFC goal consolidation during REM
         prefrontal.consolidate_goal_during_rem(da=0.3)
